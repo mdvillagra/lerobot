@@ -16,6 +16,7 @@ from lerobot.utils.action_interpolator import ActionInterpolator as ActionInterp
 from lerobot.utils.feature_spec import FeatureSpec
 
 from .act.configuration_act import ACTConfig as ACTConfig
+from .bagel_robotics.configuration_bagel_robotics import BagelRoboticsConfig as BagelRoboticsConfig
 from .chunk import ChunkPolicySpec, ExecutionMode
 from .cosmos3.configuration_cosmos3 import (
     Cosmos3EdgeConfig as Cosmos3EdgeConfig,
@@ -67,6 +68,7 @@ from .xvla.configuration_xvla import XVLAConfig as XVLAConfig
 __all__ = [
     # Configuration classes
     "ACTConfig",
+    "BagelRoboticsConfig",
     "Cosmos3EdgeConfig",
     "Cosmos3NanoConfig",
     "DiffusionConfig",

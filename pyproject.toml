@@ -253,6 +253,14 @@ topreward = ["lerobot[transformers-dep]"]
 xvla = ["lerobot[transformers-dep]"]
 eo1 = ["lerobot[transformers-dep]", "lerobot[qwen-vl-utils-dep]"]
 longwam = ["lerobot[transformers-dep]", "lerobot[diffusers-dep]", "lerobot[sentencepiece-dep]"]
+bagel_robotics = [
+    "bagel-robotics @ git+https://github.com/bageldotcom/Bagel-Robotics-1.git@20db653aa354b86ac596fc78a529c2e7d9d1a0d2",
+    "lerobot[transformers-dep]",
+    "lerobot[sentencepiece-dep]",
+    "hydra-core>=1.3.2,<1.4.0",
+    "ftfy>=6.3.1,<7.0.0",
+    "rich>=14.2.0,<16.0.0",
+]
 fastwam = [
     "lerobot[transformers-dep]",
     "lerobot[diffusers-dep]",
@@ -373,6 +381,7 @@ all = [
     "lerobot[smolvla]",
     "lerobot[fastwam]",
     "lerobot[longwam]",
+    "lerobot[bagel_robotics]",
     "lerobot[flux3]",
     "lerobot[groot]",
     "lerobot[xvla]",

@@ -64,6 +64,10 @@ def resolve_delta_timestamps(
     image_indices = (
         explicit_image_indices if explicit_image_indices is not None else cfg.observation_delta_indices
     )
+    if getattr(cfg, "image_observation_include_episode_start", False):
+        # Any sample index minus total_frames precedes its episode. Existing
+        # episode clamping then supplies its first frame in both dataset readers.
+        image_indices = [-ds_meta.total_frames, *(image_indices or [0])]
     explicit_state_indices = getattr(cfg, "state_observation_delta_indices", None)
     state_indices = (
         explicit_state_indices if explicit_state_indices is not None else cfg.observation_delta_indices

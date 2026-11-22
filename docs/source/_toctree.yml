@@ -89,6 +89,8 @@
     title: FastWAM
   - local: longwam
     title: Long-WAM
+  - local: bagel_robotics
+    title: Bagel-Robotics-1
   - local: flux3
     title: FLUX 3 Action (flux3)
   - local: evo1

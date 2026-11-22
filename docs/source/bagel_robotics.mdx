@@ -1,0 +1,80 @@
+# Bagel-Robotics-1
+
+[Bagel-Robotics-1](https://huggingface.co/bageldotcom/Bagel-Robotics-1) is a compact world-action model for bimanual manipulation. This in-tree integration registers `bagel_robotics` with LeRobot's policy/config/processor factories and supports synchronous inference and fine-tuning of the published `cp1000` checkpoint.
+
+The architecture and native checkpoint adapter come from the `bagel-robotics` optional dependency, pinned to source commit `20db653aa354b86ac596fc78a529c2e7d9d1a0d2`. The package is loaded lazily; ordinary LeRobot imports do not need it. Model source retains its MIT/Apache-2.0 licenses. The weights have separate [Bagel Labs Research License terms](https://huggingface.co/bageldotcom/Bagel-Robotics-1/blob/main/LICENSE.md).
+
+## Installation and assets
+
+Use Python 3.12 and a Linux CUDA machine with enough memory for the 12.47B video expert, 2B action expert, and frozen Wan encoders. Full fine-tuning also needs optimizer and activation memory. No GPU memory minimum or benchmark result is claimed by this integration.
+
+```bash
+uv sync --locked --python 3.12 --extra bagel_robotics --extra training --extra evaluation
+```
+
+The first policy construction downloads the six public checkpoint files (approximately 29 GB) and separately pinned encoder/tokenizer files (approximately 16.7 GB), using the Hugging Face cache. Downloads are verified with the upstream manifest's sizes, hashes, and checkpoint identity. The full dense teacher is not downloaded. Allow additional disk space for native LeRobot checkpoint exports, which include the frozen encoder weights.
+
+To use existing assets, set `--policy.bundle_path=/absolute/path/to/cp1000` and `--policy.wan_model_dir=/absolute/path/to/Wan2.1-I2V-14B-480P`. Set `--policy.download_assets=false` to require both paths, or `--policy.local_files_only=true` to use only locally cached files. Explicit paths are verified and must already contain the full original release. Keep these assets available when reloading native LeRobot checkpoints: construction rebuilds the compact architecture from the pinned original bundle before restoring the saved parameters. Default cache-based resolution is portable between machines; explicit paths must be supplied again if they move.
+
+## Input and action contract
+
+Supply exactly three RGB cameras, in head/left-wrist/right-wrist order. Defaults are:
+
+- `observation.images.head_camera`
+- `observation.images.left_camera`
+- `observation.images.right_camera`
+
+Use `--rename_map` or `--policy.camera_keys` to match your dataset. Float RGB is in `[0,1]`; `uint8` RGB is also accepted. The policy reproduces the native T-shaped camera composition and resizes it to `240 x 416`. It quantizes RGB consistently with the simulator adapter. Do not apply image normalization before the policy.
+
+Both `observation.state` and `action` have 16 components, in this exact order:
+
+```text
+left x,y,z, left qw,qx,qy,qz, left gripper,
+right x,y,z, right qw,qx,qy,qz, right gripper
+```
+
+These are absolute end-effector poses with scalar-first quaternions. Match the checkpoint's coordinate frames, units, and gripper semantics. The policy retains the checkpoint's state/action normalization, including clipping normalized inputs to `[-5,5]`. Dataset statistics do not replace it. The released checkpoint cannot directly control an SO-101 joint-position interface; a matching embodiment and action interface are required.
+
+Each batch includes a nonempty `task` string per sample. Inference supports one environment per policy instance. Call `reset()` at episode boundaries and call `select_action()` once per control tick, including during queued action playback. It records every observation, predicts 32 actions, executes 16, and uses the upstream 90% new / 10% old quaternion-aware ensemble. Instruction changes clear history and queued actions. Default sampling is BF16, ten Euler steps, shift 1, and deterministic per-replan seeds starting at 1. Exact benchmark parity additionally depends on the upstream backend, simulator, and environment settings; this integration does not change global PyTorch determinism flags.
+
+`predict_action_chunk()` returns a raw `[1,32,16]` prediction in physical units. It records the supplied observation but does not apply temporal blending. Use synchronous `select_action()` for continuous execution. Remote chunk serving and RTC are rejected because they cannot supply every intervening control observation.
+
+## Fine-tuning
+
+Use a LeRobot-format dataset at the native 25-Hz control rate, with all three views and absolute EE16 state/actions. Standard dataset feature inference fills the config. For example, replace the dataset ID below with your dataset:
+
+```bash
+uv run lerobot-train \
+  --policy.type=bagel_robotics \
+  --policy.device=cuda \
+  --policy.push_to_hub=false \
+  --dataset.repo_id=your_namespace/ee16_demonstrations \
+  --dataset.image_transforms.enable=false \
+  --batch_size=1 \
+  --steps=10000 \
+  --output_dir=outputs/train/bagel_robotics \
+  --job_name=bagel_robotics
+```
+
+The dataset factory prepends the episode's first image by requesting an offset of `-total_frames`, which both map-style and streaming readers clamp to the episode start. It then requests eight history frames at offsets `[-175,-150,-125,-100,-75,-50,-25,0]` and eight future frames at `[4,8,12,16,20,24,28,32]`. Only those 17 RGB frames are decoded for each camera. State uses the current frame; actions use offsets `0..31`. History padding is conditioning, while future-image and action padding masks are passed to the native training objective. If creating datasets manually, use `resolve_delta_timestamps(config, metadata)` to obtain this window, including the anchor.
+
+Training uses the backbone's joint video/action flow-matching loss. By default the video expert trains while the action expert and proprio encoder stay frozen (`freeze_action_expert=true`); gradients still pass through the frozen action expert into video features. Set `--policy.freeze_action_expert=false` to train both experts and the proprio encoder. VAE, CLIP, and text encoders remain frozen. Gradient checkpointing is enabled by default. The native objective supports mean reduction; per-sample loss weighting is unsupported. This is fine-tuning of the exported compact checkpoint, not a reproduction of Bagel's DEAP selection/pruning/recovery pipeline or exact optimizer continuation.
+
+LeRobot training saves the config, processors, and model weights (5-GB safetensors shards) normally. Hub upload defaults to disabled for this policy. To resume or fine-tune a saved LeRobot checkpoint, use the standard `--policy.path=/path/to/pretrained_model` and keep the original assets available as described above.
+
+## Export the original checkpoint for evaluation
+
+The upstream Hub repository is a native Bagel bundle, without a LeRobot `config.json` or processor files. Import it once before using `--policy.path`. The conversion script obtains input/output shapes from a matching dataset and writes locally:
+
+```bash
+uv run python examples/bagel_robotics/convert_checkpoint.py \
+  --dataset-repo-id=your_namespace/ee16_demonstrations \
+  --output=outputs/bagel_robotics_cp1000 \
+  --device=cuda
+```
+
+The script accepts `--dataset-root`, `--bundle-path`, `--wan-model-dir`, `--local-files-only`, and a JSON `--rename-map`. For evaluation, use the resulting directory as `--policy.path` with an environment that supplies the matching EE16 action interface and three cameras. Use `--eval.batch_size=1`. A synchronous Python deployment can also construct `BagelRoboticsPolicy(config)` directly, with explicitly supplied `input_features` and `output_features`, without exporting first.
+
+## Validation scope
+
+The integration tests cover factory/config discovery, camera composition against the upstream implementation, native history and temporal blending, episode/reset and instruction changes, padding and gradient flow, frozen components, and native checkpoint/processor serialization with a reduced local backbone. Full `cp1000` GPU inference, large-model fine-tuning, and simulator success rates require a separate CUDA run with the actual assets; they are not established by the CPU tests.
