@@ -13,12 +13,7 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 @PreTrainedConfig.register_subclass("bagel_robotics")
 @dataclass
 class BagelRoboticsConfig(PreTrainedConfig):
-    """Released Bagel-Robotics-1 EE16 checkpoint and LeRobot fine-tuning settings.
-
-    Camera order is head, left wrist, right wrist. State and action are absolute
-    [left xyz, left qwxyz, left gripper, right xyz, right qwxyz, right gripper].
-    Normalization belongs to the checkpoint's native processor, inside the policy.
-    """
+    """Bagel cp1000: head/left-wrist/right-wrist RGB and absolute dual-arm EE16 poses."""
 
     bundle_path: str | None = None
     wan_model_dir: str | None = None
@@ -60,9 +55,7 @@ class BagelRoboticsConfig(PreTrainedConfig):
             self.normalization_mapping.get(key) != NormalizationMode.IDENTITY
             for key in ("VISUAL", "STATE", "ACTION")
         ):
-            raise ValueError(
-                "Bagel uses checkpoint normalization internally; external normalization must be IDENTITY"
-            )
+            raise ValueError("Bagel normalizes internally; external normalization must be IDENTITY")
 
     @property
     def observation_delta_indices(self) -> None:

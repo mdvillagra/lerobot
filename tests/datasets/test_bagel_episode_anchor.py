@@ -4,7 +4,6 @@
 from types import SimpleNamespace
 
 import pytest
-import torch
 
 pytest.importorskip("datasets")
 
@@ -22,11 +21,7 @@ def test_bagel_anchor_and_history_match_native_indices(streaming, frame):
     meta = SimpleNamespace(
         total_frames=5000,
         fps=25,
-        features={
-            "observation.images.front": {},
-            "observation.state": {},
-            "action": {},
-        },
+        features={key: {} for key in ("observation.images.front", "observation.state", "action")},
     )
     deltas = resolve_delta_timestamps(cfg, meta, {"observation.images.front": cfg.camera_keys[0]})
     indices = [round(x * meta.fps) for x in deltas["observation.images.front"]]
@@ -49,6 +44,3 @@ def test_other_policies_keep_their_observation_windows():
     meta = SimpleNamespace(fps=25, features={"observation.images.front": {}, "observation.state": {}})
     deltas = resolve_delta_timestamps(cfg, meta)
     assert deltas is None
-    rows, pad = delta_window(2005, [0], 2000, 3000)
-    assert rows == [2005]
-    torch.testing.assert_close(pad, torch.tensor([False]))

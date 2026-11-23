@@ -1,10 +1,6 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""LeRobot integration for the published Bagel compact world-action backbone.
-
-The optional, revision-pinned bagel-robotics package owns the model mathematics,
-compact checkpoint loading, camera composition, native history and ensembling.
-"""
+"""LeRobot training/inference adapter for the optional, pinned Bagel backbone."""
 
 from collections import deque
 from typing import TYPE_CHECKING, Any, Self
@@ -67,11 +63,11 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
         for expert in (self.model.video_expert, self.model.action_expert):
             expert.use_gradient_checkpointing = config.use_gradient_checkpointing
         self.model.mot.mot_checkpoint_mixed_attn = config.use_gradient_checkpointing
-        for field, prefix in (("state", "state"), ("action", "action")):
+        for field in ("state", "action"):
             key = self._runtime.processor.shape_meta[field][0]["key"]
             norm = self._runtime.processor.normalizer.normalizers[field][key]
-            self.register_buffer(f"_{prefix}_scale", norm.scale.float().clone())
-            self.register_buffer(f"_{prefix}_offset", norm.offset.float().clone())
+            for name in ("scale", "offset"):
+                self.register_buffer(f"_{field}_{name}", getattr(norm, name).float().clone())
         self.reset()
 
     def train(self, mode: bool = True) -> Self:
@@ -116,7 +112,9 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
             raise ValueError("Bagel task instructions must be nonempty strings")
         return list(tasks)
 
-    def _observation(self, batch: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    def _observe(self, batch: dict[str, Any]) -> tuple[dict[str, Any], str]:
+        self.eval()
+        self._sync_runtime()
         state = batch[OBS_STATE]
         if state.shape != (1, 16) or not torch.isfinite(state).all():
             raise ValueError("Bagel synchronous inference requires finite state [1,16]; use one environment")
@@ -138,18 +136,15 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
             "joint_action": {"vector": state[0].detach().float().cpu().numpy()},
             "env_idx": 0,
         }
+        # Record every control tick, including ticks playing queued actions.
+        self._runtime.observe(observation)
         return observation, instruction
 
     @staticmethod
     def _rgb_uint8(image: Tensor) -> Tensor:
         if image.dtype == torch.uint8:
             return image
-        if (
-            not image.is_floating_point()
-            or not torch.isfinite(image).all()
-            or image.min() < 0
-            or image.max() > 1
-        ):
+        if not image.is_floating_point() or not ((image >= 0) & (image <= 1)).all():
             raise ValueError("Bagel RGB must be uint8 [0,255] or floating point [0,1]")
         # Native adapter truncates float images when converting to simulator RGB.
         return (image.detach() * 255).to(torch.uint8)
@@ -162,24 +157,12 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
 
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Any], **kwargs: Any) -> Tensor:
-        """Observe one control tick and return the raw 32-step physical action prediction.
-
-        Callers must supply every intervening observation to select_action. Remote
-        chunk serving/RTC cannot preserve this model's 25-Hz history contract.
-        """
-        self.eval()
-        self._sync_runtime()
-        observation, instruction = self._observation(batch)
-        self._runtime.observe(observation)
-        return self._predict_observed(observation, instruction)
+        """Observe a tick and predict raw physical actions; use select_action for playback."""
+        return self._predict_observed(*self._observe(batch))
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Any], **kwargs: Any) -> Tensor:
-        self.eval()
-        self._sync_runtime()
-        observation, instruction = self._observation(batch)
-        # Every tick, including ticks playing queued actions, contributes history.
-        self._runtime.observe(observation)
+        observation, instruction = self._observe(batch)
         if not self._action_queue:
             chunk = self._predict_observed(observation, instruction)[0].cpu().numpy()
             actions = torch.from_numpy(self._ensemble.apply(chunk)).to(self.model.device)
@@ -215,8 +198,7 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
         for key in self.config.camera_keys:
             if f"{key}_is_pad" in batch:
                 image_pad |= batch[f"{key}_is_pad"].to(video.device)
-        # Clamped history is real conditioning, including the deliberately clamped
-        # episode anchor. Only future target frames participate in video padding.
+        # Clamped history (including the episode anchor) is valid conditioning.
         image_pad[:, :9] = False
         sample = {
             "video": video,

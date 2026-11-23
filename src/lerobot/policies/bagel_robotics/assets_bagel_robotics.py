@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 
 from huggingface_hub import snapshot_download
 
+from lerobot.utils.constants import HF_LEROBOT_HOME
 from lerobot.utils.import_utils import _bagel_robotics_available, require_package
 
 from .configuration_bagel_robotics import BagelRoboticsConfig
@@ -15,31 +16,20 @@ if TYPE_CHECKING or _bagel_robotics_available:
 
 
 def resolve_bagel_assets(config: BagelRoboticsConfig) -> tuple[Path, Path]:
-    """Resolve and verify the exact public cp1000 bundle and auxiliary assets.
-
-    Reuse the immutable manifest shipped with the pinned backbone package. Only
-    its six release files and separately pinned encoders/tokenizer are fetched.
-    """
+    """Resolve local assets or download the pinned release, then verify its hashes."""
     require_package("bagel-robotics", extra="bagel_robotics", import_name="bagel_robotics")
     if not config.download_assets and (not config.bundle_path or not config.wan_model_dir):
         raise ValueError("download_assets=False requires bundle_path and wan_model_dir")
-    bundle = (
-        Path(config.bundle_path).expanduser().resolve()
-        if config.bundle_path
-        else Path(
-            snapshot_download(
-                MANIFEST["repo_id"],
-                revision=MANIFEST["revision"],
-                allow_patterns=list(MANIFEST["files"]),
-                local_files_only=config.local_files_only,
-            )
-        )
+    bundle = config.bundle_path or snapshot_download(
+        MANIFEST["repo_id"],
+        revision=MANIFEST["revision"],
+        # The native loader needs architecture metadata beside the resolved video.pt.
+        local_dir=HF_LEROBOT_HOME / "bagel_robotics" / MANIFEST["revision"],
+        allow_patterns=list(MANIFEST["files"]),
+        local_files_only=config.local_files_only,
     )
-    prefix = "checkpoints/Wan2.1-I2V-14B-480P"
-    wan = (
-        Path(config.wan_model_dir).expanduser().resolve()
-        if config.wan_model_dir
-        else Path(
+    wan = config.wan_model_dir or str(
+        Path(
             snapshot_download(
                 MANIFEST["wan"]["repo"],
                 revision=MANIFEST["wan"]["revision"],
@@ -47,8 +37,9 @@ def resolve_bagel_assets(config: BagelRoboticsConfig) -> tuple[Path, Path]:
                 local_files_only=config.local_files_only,
             )
         )
-        / prefix
+        / "checkpoints/Wan2.1-I2V-14B-480P"
     )
-    verify_bundle(bundle)
-    verify_wan(wan)
-    return bundle, wan
+    bundle_path, wan_path = (Path(path).expanduser().resolve() for path in (bundle, wan))
+    verify_bundle(bundle_path)
+    verify_wan(wan_path)
+    return bundle_path, wan_path

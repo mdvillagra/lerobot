@@ -1,11 +1,7 @@
 #!/usr/bin/env python
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Import Bagel cp1000 into LeRobot's config/processors/sharded-safetensors format.
-
-The dataset supplies the three camera feature shapes and EE16 state/action
-metadata. This script writes locally and never uploads to the Hub.
-"""
+"""Export Bagel cp1000 locally in LeRobot format, using feature shapes from a matching dataset."""
 
 import argparse
 import json
@@ -37,12 +33,10 @@ def main() -> None:
     metadata = LeRobotDatasetMetadata(args.dataset_repo_id, root=args.dataset_root)
     policy = make_policy(config, ds_meta=metadata, rename_map=args.rename_map)
     preprocessor, postprocessor = make_pre_post_processors(config)
-    # Match deployment camera names to the names used by the source dataset.
-    if args.rename_map:
-        preprocessor.steps[0].rename_map = args.rename_map
+    preprocessor.steps[0].rename_map = args.rename_map
     policy.save_pretrained(args.output)
-    preprocessor.save_pretrained(args.output)
-    postprocessor.save_pretrained(args.output)
+    for processor in (preprocessor, postprocessor):
+        processor.save_pretrained(args.output)
     print(f"Saved Bagel-Robotics-1 locally to {args.output.resolve()}")
 
 

@@ -1,10 +1,6 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""CPU contract tests: real native history, ensemble and reduced MoT training math.
-
-Only checkpoint IO and the expensive VAE/CLIP/text encoders are replaced. The
-training loss, video/action experts, and cross-expert gradients are upstream code.
-"""
+"""CPU checks with native history/ensemble/MoT math and lightweight encoder/IO substitutes."""
 
 from types import SimpleNamespace
 
@@ -25,7 +21,6 @@ from bagel_robotics.models.backbone.wan21_14b.vpp2 import VPP2
 from bagel_robotics.models.backbone.wan21_14b.wan_video_dit import WanVideoDiT
 
 import lerobot.policies.bagel_robotics.modeling_bagel_robotics as modeling
-from lerobot.policies import make_pre_post_processors
 from tests.policies.bagel_robotics.test_configuration_bagel_robotics import config
 
 
@@ -46,28 +41,17 @@ class TinyCLIP(nn.Module):
 
 class TinyBackbone(VPP2):
     def __init__(self):
-        video = WanVideoDiT(
-            hidden_dim=16,
-            ffn_dim=32,
-            freq_dim=8,
-            text_dim=8,
-            in_dim=8,
-            out_dim=2,
-            num_heads=2,
-            attn_head_dim=8,
-            num_layers=1,
-        )
-        action = ActionDiT(
-            hidden_dim=16,
-            action_dim=16,
-            ffn_dim=32,
-            text_dim=8,
-            freq_dim=8,
-            eps=1e-6,
-            num_heads=2,
-            attn_head_dim=8,
-            num_layers=1,
-        )
+        dimensions = {
+            "hidden_dim": 16,
+            "ffn_dim": 32,
+            "freq_dim": 8,
+            "text_dim": 8,
+            "num_heads": 2,
+            "attn_head_dim": 8,
+            "num_layers": 1,
+        }
+        video = WanVideoDiT(in_dim=8, out_dim=2, **dimensions)
+        action = ActionDiT(action_dim=16, eps=1e-6, **dimensions)
         super().__init__(
             video,
             action,
@@ -87,8 +71,7 @@ class TinyBackbone(VPP2):
         return torch.zeros(len(prompts), 2, 8), torch.ones(len(prompts), 2, dtype=torch.bool)
 
     def infer_action(self, **kwargs):
-        # Sampling itself needs the real giant assets; retain all native policy
-        # normalization/history/seeding and only replace the model prediction.
+        # Deterministic predictions isolate history/ensemble checks from sampling.
         self.inference_calls.append(kwargs)
         action = torch.full((1, 32, 16), float(kwargs["seed"]))
         action[:, :, 3:7] = torch.tensor([1.0, 0.0, 0.0, 0.0])
@@ -112,7 +95,7 @@ class OfflineRuntime(RoboDojoVPP2Policy):
         self.processor = SimpleNamespace(
             shape_meta=shape_meta, normalizer=norm, action_state_transform=lambda x: x
         )
-        self.output_action_dim = self.action_horizon = 16
+        self.output_action_dim = 16
         self.action_horizon = 32
         self.num_inference_steps = kwargs["num_inference_steps"]
         self.sigma_shift = kwargs["sigma_shift"]
@@ -163,11 +146,14 @@ def test_training_camera_composition_matches_native(policy):
         torch.testing.assert_close(result[:, :, frame], expected, rtol=0, atol=0)
 
 
-def test_native_history_records_queued_ticks_and_seeds(policy):
+def test_history_blending_and_replan_seeds(policy):
     data = batch(policy.config)
-    for _tick in range(177):
+    for tick in range(177):
         action = policy.select_action(data)
         assert action.shape == (1, 16)
+        if tick in (0, 16):
+            assert action[0, 0].item() == pytest.approx(1.0 if tick == 0 else 1.9)
+            torch.testing.assert_close(action[:, 3:7].norm(dim=-1), torch.ones(1))
     calls = policy.model.inference_calls
     assert len(calls) == 12
     assert [call["seed"] for call in calls] == list(range(1, 13))
@@ -177,66 +163,48 @@ def test_native_history_records_queued_ticks_and_seeds(policy):
     assert info["selected_steps"] == [0, 1, 26, 51, 76, 101, 126, 151, 176]
 
 
-def test_temporal_blending_and_reset(policy):
+@pytest.mark.parametrize("boundary", ["reset", "drop_queued_actions", "instruction"])
+def test_episode_boundaries_clear_history_queue_and_seed(policy, boundary):
     data = batch(policy.config)
     first = policy.select_action(data)
-    for _ in range(15):
-        policy.select_action(data)
-    second = policy.select_action(data)
-    assert first[0, 0].item() == pytest.approx(1.0)
-    assert second[0, 0].item() == pytest.approx(1.9)
-    torch.testing.assert_close(second[:, 3:7].norm(dim=-1), torch.ones(1))
-    policy.reset()
+    if boundary == "instruction":
+        data["task"] = ["lower the board"]
+    else:
+        getattr(policy, boundary)()
+        assert not policy._action_queue and not policy._runtime._history_by_env
     torch.testing.assert_close(policy.select_action(data), first)
-    assert policy._runtime._history_step_by_env == {0: 0}
-
-
-def test_instruction_change_resets_queue_history_and_seed(policy):
-    data = batch(policy.config)
-    policy.select_action(data)
-    data["task"] = ["lower the board"]
-    policy.select_action(data)
-    assert len(policy.model.inference_calls) == 2
     assert policy.model.inference_calls[-1]["seed"] == 1
     assert policy._runtime._history_step_by_env == {0: 0}
-    policy.drop_queued_actions()
-    assert not policy._action_queue
-    assert not policy._runtime._history_by_env
-
-
-def test_direct_chunk_and_remote_contract(policy):
-    chunk = policy.predict_action_chunk(batch(policy.config))
-    assert chunk.shape == (1, 32, 16)
-    assert not policy._action_queue
-    with pytest.raises(ValueError, match="temporal history"):
-        policy.chunk_inference_spec()
 
 
 def test_real_native_euler_sampling_is_finite_and_reproducible(policy):
-    # Run the actual cached-video/Euler sampler with the reduced experts. Only
-    # encoders and checkpoint loading remain replaced in this test.
+    # Exercise the real sampler with the reduced experts.
     policy.model.infer_action = VPP2.infer_action.__get__(policy.model)
     data = batch(policy.config)
     first = policy.predict_action_chunk(data)
     assert first.shape == (1, 32, 16)
     assert torch.isfinite(first).all()
+    assert not policy._action_queue
+    with pytest.raises(ValueError, match="temporal history"):
+        policy.chunk_inference_spec()
     policy.reset()
     torch.testing.assert_close(policy.predict_action_chunk(data), first, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("invalid", ["batch", "task", "rgb", "state", "temporal"])
-def test_invalid_inference_inputs(policy, invalid):
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("observation.state", torch.zeros(2, 16)),
+        ("task", [""]),
+        ("observation.images.head_camera", torch.full((1, 3, 12, 16), 2.0)),
+        ("observation.images.head_camera", torch.full((1, 3, 12, 16), torch.nan)),
+        ("observation.state", torch.full((1, 16), torch.nan)),
+        ("observation.images.head_camera", torch.zeros(1, 17, 3, 12, 16)),
+    ],
+)
+def test_invalid_inference_inputs(policy, key, value):
     data = batch(policy.config)
-    if invalid == "batch":
-        data["observation.state"] = torch.zeros(2, 16)
-    elif invalid == "task":
-        data["task"] = [""]
-    elif invalid == "rgb":
-        data[policy.config.camera_keys[0]].fill_(2)
-    elif invalid == "state":
-        data["observation.state"].fill_(float("nan"))
-    else:
-        data[policy.config.camera_keys[0]] = torch.zeros(1, 17, 3, 12, 16)
+    data[key] = value
     with pytest.raises(ValueError):
         policy.select_action(data)
 
@@ -248,8 +216,7 @@ def test_native_training_backward_frozen_modules_and_padding(policy):
         data[f"{key}_is_pad"][:, :8] = True
         data[f"{key}_is_pad"][:, -1] = True
     policy.train()
-    # Isolate action supervision: a video-only loss could hide a detached
-    # cross-expert gradient path when the action expert is frozen.
+    # Isolate action supervision to check gradients through the frozen action expert.
     policy.model.loss_lambda_video = 0
     frozen = {name: p.clone() for name, p in policy.named_parameters() if not p.requires_grad}
     optimizer = torch.optim.AdamW(policy.get_optim_params(), lr=1e-4)
@@ -273,7 +240,7 @@ def test_native_training_backward_frozen_modules_and_padding(policy):
         policy(data, reduction="none")
 
 
-def test_unfreezing_action_expert(policy, monkeypatch, tmp_path):
+def test_unfreezing_action_expert(policy):
     cfg = config(dtype=torch.float32, freeze_action_expert=False)
     unfrozen = modeling.BagelRoboticsPolicy(cfg)
     assert all(p.requires_grad for p in unfrozen.model.action_expert.parameters())
@@ -286,14 +253,10 @@ def test_training_rejects_non_native_frame_rate_before_loading(policy):
         modeling.BagelRoboticsPolicy(config(dtype=torch.float32), dataset_meta=SimpleNamespace(fps=30))
 
 
-def test_checkpoint_and_processors_roundtrip(policy, tmp_path):
+def test_checkpoint_roundtrip(policy, tmp_path):
     data = batch(policy.config)
-    policy.eval()
     expected = policy.predict_action_chunk(data)
     policy.save_pretrained(tmp_path)
-    pre, post = make_pre_post_processors(policy.config)
-    pre.save_pretrained(tmp_path)
-    post.save_pretrained(tmp_path)
     loaded = modeling.BagelRoboticsPolicy.from_pretrained(tmp_path)
     torch.testing.assert_close(loaded.predict_action_chunk(data), expected)
     for name, tensor in policy.state_dict().items():

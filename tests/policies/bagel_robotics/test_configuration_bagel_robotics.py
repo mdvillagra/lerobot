@@ -81,8 +81,8 @@ def test_processors_preserve_physical_coordinates_and_rgb(tmp_path):
     assert result[cfg.camera_keys[0]].shape == (1, 3, 12, 16)
     action = torch.randn(1, 32, 16)
     torch.testing.assert_close(post(action), action)
-    pre.save_pretrained(tmp_path)
-    post.save_pretrained(tmp_path)
+    for processor in (pre, post):
+        processor.save_pretrained(tmp_path)
     pre2, post2 = make_pre_post_processors(cfg, pretrained_path=tmp_path)
     torch.testing.assert_close(pre2(batch)["observation.state"], result["observation.state"])
     torch.testing.assert_close(post2(action), action)

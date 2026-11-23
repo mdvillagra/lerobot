@@ -1,6 +1,8 @@
 # Copyright 2026 The HuggingFace Inc. team. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from unittest.mock import DEFAULT, patch
+
 import pytest
 
 pytest.importorskip("bagel_robotics")
@@ -9,54 +11,36 @@ from lerobot.policies import BagelRoboticsConfig
 from lerobot.policies.bagel_robotics import assets_bagel_robotics as assets
 
 
-def test_explicit_local_assets_are_verified_without_network(monkeypatch, tmp_path):
-    calls = []
-
-    def unexpected_download(*args, **kwargs):
-        pytest.fail("Explicit local assets must not download anything")
-
-    monkeypatch.setattr(assets, "snapshot_download", unexpected_download)
-    monkeypatch.setattr(assets, "verify_bundle", lambda path: calls.append(("bundle", path)))
-    monkeypatch.setattr(assets, "verify_wan", lambda path: calls.append(("wan", path)))
-    cfg = BagelRoboticsConfig(
-        device="cpu",
-        bundle_path=str(tmp_path / "cp1000"),
-        wan_model_dir=str(tmp_path / "wan"),
-        download_assets=False,
-    )
-    bundle, wan = assets.resolve_bagel_assets(cfg)
-    assert calls == [("bundle", bundle), ("wan", wan)]
-
-
-def test_offline_cache_requests_only_the_pinned_release(monkeypatch, tmp_path):
-    requests = []
-
-    def cached(repo_id, **kwargs):
-        requests.append((repo_id, kwargs))
-        return str(tmp_path / str(len(requests)))
-
-    monkeypatch.setattr(assets, "snapshot_download", cached)
-    monkeypatch.setattr(assets, "verify_bundle", lambda path: None)
-    monkeypatch.setattr(assets, "verify_wan", lambda path: None)
-    bundle, wan = assets.resolve_bagel_assets(BagelRoboticsConfig(device="cpu", local_files_only=True))
-    assert bundle == tmp_path / "1"
-    assert wan == tmp_path / "2/checkpoints/Wan2.1-I2V-14B-480P"
-    assert requests[0][0] == "bageldotcom/Bagel-Robotics-1"
-    assert len(requests[0][1]["revision"]) == 40
-    assert set(requests[0][1]["allow_patterns"]) == set(assets.MANIFEST["files"])
-    assert all(request[1]["local_files_only"] for request in requests)
-    assert not any("diffusion_pytorch_model" in name for name in requests[1][1]["allow_patterns"])
+@pytest.mark.parametrize("local", [True, False])
+def test_assets_use_local_paths_or_pinned_offline_cache(tmp_path, local):
+    bundle, wan = tmp_path / "bundle", tmp_path / "wan/checkpoints/Wan2.1-I2V-14B-480P"
+    paths = {"bundle_path": str(bundle), "wan_model_dir": str(wan)} if local else {}
+    cfg = BagelRoboticsConfig(device="cpu", local_files_only=True, download_assets=not local, **paths)
+    with patch.multiple(assets, snapshot_download=DEFAULT, verify_bundle=DEFAULT, verify_wan=DEFAULT) as io:
+        download = io["snapshot_download"]
+        download.side_effect = [str(bundle), str(tmp_path / "wan")]
+        assert assets.resolve_bagel_assets(cfg) == (bundle, wan)
+        io["verify_bundle"].assert_called_once_with(bundle)
+        io["verify_wan"].assert_called_once_with(wan)
+        if local:
+            download.assert_not_called()
+        else:
+            release, encoders = download.call_args_list
+            assert release.args == ("bageldotcom/Bagel-Robotics-1",)
+            assert len(release.kwargs["revision"]) == 40
+            assert release.kwargs["local_dir"].name == release.kwargs["revision"]
+            assert set(release.kwargs["allow_patterns"]) == set(assets.MANIFEST["files"])
+            assert all(call.kwargs["local_files_only"] for call in (release, encoders))
+            assert not any("diffusion_pytorch_model" in name for name in encoders.kwargs["allow_patterns"])
 
 
-def test_missing_local_paths_or_corrupt_bundle_stop_loading(monkeypatch, tmp_path):
+def test_missing_paths_and_corrupt_assets_stop_loading(tmp_path):
     cfg = BagelRoboticsConfig(device="cpu", download_assets=False)
     with pytest.raises(ValueError, match="requires bundle_path"):
         assets.resolve_bagel_assets(cfg)
-
-    def corrupt(path):
-        raise ValueError("Checkpoint SHA-256 mismatch: action.pt")
-
-    monkeypatch.setattr(assets, "verify_bundle", corrupt)
     cfg.bundle_path = cfg.wan_model_dir = str(tmp_path)
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+    with (
+        patch.object(assets, "verify_bundle", side_effect=ValueError("SHA-256 mismatch")),
+        pytest.raises(ValueError, match="SHA-256 mismatch"),
+    ):
         assets.resolve_bagel_assets(cfg)
