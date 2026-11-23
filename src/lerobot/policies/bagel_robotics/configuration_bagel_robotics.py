@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass, field
+from typing import ClassVar
 
 import torch
 
@@ -15,6 +16,7 @@ from lerobot.utils.constants import ACTION, OBS_STATE
 class BagelRoboticsConfig(PreTrainedConfig):
     """Bagel cp1000: head/left-wrist/right-wrist RGB and absolute dual-arm EE16 poses."""
 
+    image_observation_include_episode_start: ClassVar[bool] = True
     bundle_path: str | None = None
     wan_model_dir: str | None = None
     download_assets: bool = True
@@ -65,10 +67,6 @@ class BagelRoboticsConfig(PreTrainedConfig):
     def image_observation_delta_indices(self) -> list[int]:
         # Dataset factory prepends the episode anchor, yielding 17 RGB frames.
         return [*range(-175, 1, 25), *range(4, 33, 4)]
-
-    @property
-    def image_observation_include_episode_start(self) -> bool:
-        return True
 
     @property
     def action_delta_indices(self) -> list[int]:

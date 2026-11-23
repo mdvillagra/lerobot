@@ -129,12 +129,10 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
             image = batch[key]
             if image.ndim != 4 or image.shape[:2] != (1, 3):
                 raise ValueError(f"{key} must be the current RGB image [1,3,H,W]")
-            image = self._rgb_uint8(image)[0].permute(1, 2, 0).cpu().numpy()
-            images[native] = {"rgb": image}
+            images[native] = {"rgb": self._rgb_uint8(image)[0].permute(1, 2, 0).cpu().numpy()}
         observation = {
             "observation": images,
             "joint_action": {"vector": state[0].detach().float().cpu().numpy()},
-            "env_idx": 0,
         }
         # Record every control tick, including ticks playing queued actions.
         self._runtime.observe(observation)
@@ -149,22 +147,19 @@ class BagelRoboticsPolicy(PreTrainedPolicy):
         # Native adapter truncates float images when converting to simulator RGB.
         return (image.detach() * 255).to(torch.uint8)
 
-    def _predict_observed(self, observation: dict[str, Any], instruction: str) -> Tensor:
-        chunk = self._runtime._infer_action_chunk(observation, instruction)
-        if chunk.shape != (32, 16) or not np.isfinite(chunk).all():
-            raise ValueError("Bagel backbone must return a finite [32,16] action chunk")
-        return torch.from_numpy(chunk.copy()).unsqueeze(0).to(device=self.model.device, dtype=torch.float32)
-
     @torch.no_grad()
     def predict_action_chunk(self, batch: dict[str, Any], **kwargs: Any) -> Tensor:
         """Observe a tick and predict raw physical actions; use select_action for playback."""
-        return self._predict_observed(*self._observe(batch))
+        chunk = self._runtime._infer_action_chunk(*self._observe(batch))
+        if chunk.shape != (32, 16) or not np.isfinite(chunk).all():
+            raise ValueError("Bagel backbone must return a finite [32,16] action chunk")
+        return torch.tensor(chunk, device=self.model.device, dtype=torch.float32).unsqueeze(0)
 
     @torch.no_grad()
     def select_action(self, batch: dict[str, Any], **kwargs: Any) -> Tensor:
         observation, instruction = self._observe(batch)
         if not self._action_queue:
-            chunk = self._predict_observed(observation, instruction)[0].cpu().numpy()
+            chunk = self._runtime._infer_action_chunk(observation, instruction)
             actions = torch.from_numpy(self._ensemble.apply(chunk)).to(self.model.device)
             self._action_queue.extend(actions.unsqueeze(1))
         return self._action_queue.popleft()

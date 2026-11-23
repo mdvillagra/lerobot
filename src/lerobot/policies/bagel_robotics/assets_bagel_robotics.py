@@ -28,18 +28,18 @@ def resolve_bagel_assets(config: BagelRoboticsConfig) -> tuple[Path, Path]:
         allow_patterns=list(MANIFEST["files"]),
         local_files_only=config.local_files_only,
     )
-    wan = config.wan_model_dir or str(
-        Path(
-            snapshot_download(
-                MANIFEST["wan"]["repo"],
-                revision=MANIFEST["wan"]["revision"],
-                allow_patterns=[entry["rfilename"] for entry in MANIFEST["wan"]["files"]],
-                local_files_only=config.local_files_only,
-            )
+    if config.wan_model_dir:
+        wan_path = Path(config.wan_model_dir).expanduser().resolve()
+    else:
+        encoders = MANIFEST["wan"]
+        root = snapshot_download(
+            encoders["repo"],
+            revision=encoders["revision"],
+            allow_patterns=[entry["rfilename"] for entry in encoders["files"]],
+            local_files_only=config.local_files_only,
         )
-        / "checkpoints/Wan2.1-I2V-14B-480P"
-    )
-    bundle_path, wan_path = (Path(path).expanduser().resolve() for path in (bundle, wan))
+        wan_path = (Path(root) / "checkpoints/Wan2.1-I2V-14B-480P").resolve()
+    bundle_path = Path(bundle).expanduser().resolve()
     verify_bundle(bundle_path)
     verify_wan(wan_path)
     return bundle_path, wan_path

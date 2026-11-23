@@ -17,7 +17,7 @@ from lerobot.policies import (
 
 
 def config(**kwargs):
-    cfg = BagelRoboticsConfig(device="cpu", **kwargs)
+    cfg = make_policy_config("bagel_robotics", device="cpu", **kwargs)
     cfg.input_features = {
         **{key: PolicyFeature(FeatureType.VISUAL, (3, 12, 16)) for key in cfg.camera_keys},
         "observation.state": PolicyFeature(FeatureType.STATE, (16,)),
@@ -28,7 +28,7 @@ def config(**kwargs):
 
 def test_config_factory_and_roundtrip(tmp_path):
     cfg = config()
-    assert isinstance(make_policy_config("bagel_robotics", device="cpu"), BagelRoboticsConfig)
+    assert isinstance(cfg, BagelRoboticsConfig)
     assert get_policy_class("bagel_robotics").config_class is BagelRoboticsConfig
     assert cfg.push_to_hub is False
     cfg.save_pretrained(tmp_path)
@@ -70,22 +70,27 @@ def test_features_reject_joint_actions_and_missing_camera():
 
 def test_processors_preserve_physical_coordinates_and_rgb(tmp_path):
     cfg = config()
-    pre, post = make_pre_post_processors(cfg, dataset_stats={"action": {"mean": torch.full((16,), 999.0)}})
+    stats = {"action": {"mean": torch.full((16,), 999.0)}}
+    pre, post = make_pre_post_processors(cfg, dataset_stats=stats)
     batch = {
         **{key: torch.full((3, 12, 16), 0.25) for key in cfg.camera_keys},
         "observation.state": torch.arange(16).float(),
         "task": "pick up the board",
     }
-    result = pre(batch)
-    torch.testing.assert_close(result["observation.state"], batch["observation.state"].unsqueeze(0))
-    assert result[cfg.camera_keys[0]].shape == (1, 3, 12, 16)
-    action = torch.randn(1, 32, 16)
-    torch.testing.assert_close(post(action), action)
     for processor in (pre, post):
         processor.save_pretrained(tmp_path)
-    pre2, post2 = make_pre_post_processors(cfg, pretrained_path=tmp_path)
-    torch.testing.assert_close(pre2(batch)["observation.state"], result["observation.state"])
-    torch.testing.assert_close(post2(action), action)
+    action = torch.randn(1, 32, 16)
+    reloaded = make_pre_post_processors(
+        cfg,
+        pretrained_path=tmp_path,
+        preprocessor_overrides={"normalizer_processor": {"stats": stats}},
+        postprocessor_overrides={"unnormalizer_processor": {"stats": stats}},
+    )
+    for preprocess, postprocess in ((pre, post), reloaded):
+        result = preprocess(batch)
+        for key in (*cfg.camera_keys, "observation.state"):
+            torch.testing.assert_close(result[key], batch[key].unsqueeze(0))
+        torch.testing.assert_close(postprocess(action), action)
 
 
 def test_import_does_not_load_optional_backbone():

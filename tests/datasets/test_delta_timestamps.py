@@ -11,14 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from types import SimpleNamespace
+
 import pytest
 
 pytest.importorskip("datasets", reason="datasets is required (install lerobot[dataset])")
 
+from lerobot.datasets.factory import resolve_delta_timestamps
 from lerobot.datasets.feature_utils import (
     check_delta_timestamps,
     get_delta_indices,
 )
+from lerobot.datasets.utils import delta_window
+from lerobot.policies import ACTConfig, BagelRoboticsConfig
 from tests.fixtures.constants import DUMMY_MOTOR_FEATURES
 
 pytestmark = pytest.mark.dataset
@@ -140,3 +145,27 @@ def test_delta_indices(valid_delta_timestamps_factory, delta_indices_factory):
     expected_delta_indices = delta_indices_factory(min_max_range=min_max_range)
     actual_delta_indices = get_delta_indices(delta_timestamps, fps)
     assert expected_delta_indices == actual_delta_indices
+
+
+@pytest.mark.parametrize("start", [0, 2000], ids=["episode-relative", "dataset-absolute"])
+@pytest.mark.parametrize("frame", [0, 1, 176, 999])
+def test_bagel_episode_anchor_and_relative_frames(start, frame):
+    cfg = BagelRoboticsConfig(device="cpu")
+    camera = "observation.images.front"
+    meta = SimpleNamespace(
+        fps=25, total_frames=5000, features=dict.fromkeys((camera, "observation.state", "action"))
+    )
+    deltas = resolve_delta_timestamps(cfg, meta, {camera: cfg.camera_keys[0]})
+    indices = get_delta_indices(deltas, meta.fps)
+    assert set(indices) == {camera, "action"}
+    assert indices["action"] == list(range(32))
+    rows, pad = delta_window(start + frame, indices[camera], start, start + 1000)
+    history = [start + max(0, frame + offset) for offset in range(-175, 1, 25)]
+    future = [start + min(999, frame + offset) for offset in range(4, 33, 4)]
+    assert rows == [start, *history, *future]
+    assert pad[0]
+
+
+def test_act_has_no_image_or_state_window():
+    meta = SimpleNamespace(fps=25, features={"observation.images.front": {}, "observation.state": {}})
+    assert resolve_delta_timestamps(ACTConfig(device="cpu"), meta) is None

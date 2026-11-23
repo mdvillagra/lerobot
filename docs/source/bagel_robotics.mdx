@@ -1,55 +1,40 @@
 # Bagel-Robotics-1
 
-[Bagel-Robotics-1](https://huggingface.co/bageldotcom/Bagel-Robotics-1) is available as the in-tree `bagel_robotics` policy for synchronous inference and fine-tuning. Its optional backbone dependency is pinned to commit `20db653aa354b86ac596fc78a529c2e7d9d1a0d2`. Model source uses MIT/Apache-2.0; weights retain the separate [Bagel Labs Research License](https://huggingface.co/bageldotcom/Bagel-Robotics-1/blob/main/LICENSE.md).
+The `bagel_robotics` policy runs and fine-tunes Bagel Labs' cp1000 checkpoint. The code uses MIT/Apache-2.0 licenses. The weights use the [Bagel Labs Research License](https://huggingface.co/bageldotcom/Bagel-Robotics-1/blob/main/LICENSE.md).
 
-## Install and load assets
-
-Use Python 3.12 and Linux CUDA, with memory for the video/action experts, frozen encoders, and training optimizer/activations:
+Install on Linux with CUDA and Python 3.12.
 
 ```bash
 uv sync --locked --python 3.12 --extra bagel_robotics --extra training --extra evaluation
 ```
 
-First construction downloads and verifies the pinned cp1000 bundle (~29 GB) and encoders/tokenizer (~16.7 GB) through the Hub cache. To use existing assets, set `--policy.bundle_path=/path/to/cp1000` and `--policy.wan_model_dir=/path/to/Wan2.1-I2V-14B-480P`. `--policy.download_assets=false` requires both paths; `--policy.local_files_only=true` permits only cached files. Keep the original assets available when reloading saved LeRobot checkpoints: they rebuild the compact architecture before restoring weights. Exports include frozen encoders and need additional disk space.
+First use downloads and verifies the pinned model (~29 GB) and Wan encoders/tokenizer (~16.7 GB). Keep them available when loading LeRobot checkpoints. Set `--policy.local_files_only=true` for cached assets or supply `--policy.bundle_path` and `--policy.wan_model_dir` with `--policy.download_assets=false`.
 
 ## Inputs and inference
 
-Supply three RGB cameras in head/left-wrist/right-wrist order: `observation.images.head_camera`, `observation.images.left_camera`, and `observation.images.right_camera`. Use `--rename_map` or `--policy.camera_keys` for different names. RGB accepts uint8 or floats in `[0,1]`; the policy composes the native T-shaped view at `240 x 416` and applies checkpoint normalization internally.
-
-Both `observation.state` and `action` must contain absolute end-effector poses in this EE16 order:
-
-```text
-left x,y,z, left qw,qx,qy,qz, left gripper,
-right x,y,z, right qw,qx,qy,qz, right gripper
-```
-
-Match the checkpoint's coordinate frames, units, and gripper semantics. It cannot directly control SO-101 joint-position actions. Include a nonempty `task` string per sample. Dataset statistics do not replace checkpoint normalization.
-
-Inference supports one environment per instance. Call `reset()` at episode boundaries and `select_action()` every control tick, including queued playback. It predicts 32 actions, executes 16, and blends overlapping predictions with the native 90% new / 10% previous quaternion-aware ensemble. Instruction changes reset history, queue, and seeds. Defaults are BF16, ten Euler steps, shift 1, and seeds starting at 1. `predict_action_chunk()` records the supplied observation and returns raw `[1,32,16]` physical actions without blending. Remote chunk serving and RTC are unsupported because they cannot supply intervening observations.
+- Under `observation.images`, provide `head_camera`, `left_camera`, and `right_camera` as uint8 RGB or floats in `[0,1]`. Use `--rename_map` or set `--policy.camera_keys` in head/left-wrist/right-wrist order.
+- Provide a nonempty `task` per sample. Both `observation.state` and `action` use absolute EE16 poses, left arm first. Each arm contributes `x, y, z, qw, qx, qy, qz, gripper` in the checkpoint's frames and units. Joint-position datasets such as SO-101 require conversion.
+- Use one environment per policy. Call `reset()` at episode boundaries and `select_action()` every control tick to maintain camera history. It predicts 32 actions, executes 16, and blends the overlap with 90% weight on the new prediction. Changing the task resets history and seeds. For raw physical actions, `predict_action_chunk()` observes one tick and returns `[1,32,16]`. Remote chunk serving and RTC cannot supply the intervening frames.
 
 ## Fine-tune
-
-Use a 25-Hz LeRobot dataset with all three views and EE16 state/actions:
 
 ```bash
 uv run lerobot-train --policy.type=bagel_robotics --policy.device=cuda \
   --dataset.repo_id=your_namespace/ee16_demonstrations --dataset.image_transforms.enable=false \
-  --batch_size=1 --steps=10000 --output_dir=outputs/train/bagel_robotics --job_name=bagel_robotics
+  --batch_size=1 --steps=10000 --output_dir=outputs/train/bagel_robotics
 ```
 
-The loader supplies the episode's first frame, history at offsets `[-175,-150,-125,-100,-75,-50,-25,0]`, and future frames at `[4,8,12,16,20,24,28,32]`. State uses the current frame and actions use `0..31`. Clamped history remains valid conditioning; future-image and action padding masks reach the native joint flow-matching loss. Manual dataset construction must use `resolve_delta_timestamps(config, metadata)` to include the episode anchor.
+Use a 25-Hz dataset. Each training sample combines the episode's first frame, eight history frames at 25-frame intervals ending at the current frame, eight future frames at four-frame intervals, the current state, and 32 actions. For manually constructed datasets, use `resolve_delta_timestamps(config, metadata)` to include the episode anchor.
 
-By default the video expert trains while action/proprio and VAE/CLIP/text encoders remain frozen. `--policy.freeze_action_expert=false` also trains action/proprio. Gradient checkpointing is enabled; only mean loss reduction is supported. This fine-tunes the compact export, without reproducing DEAP or restoring its original optimizer. Training saves config, processors, and 5-GB safetensors shards. Hub upload defaults to disabled. Resume or fine-tune a saved checkpoint with `--policy.path=/path/to/pretrained_model`.
+By default only the video expert trains, with BF16 and gradient checkpointing. Set `--policy.freeze_action_expert=false` to train action/proprio too. Normalization uses checkpoint statistics. Training saves processors and sharded weights locally, including the frozen encoders. To fine-tune the result, set `--policy.path=/path/to/pretrained_model`.
 
-## Import cp1000 for evaluation
+## Export the original checkpoint
 
-The original Hub bundle lacks LeRobot config/processors. Export it locally using a matching dataset's feature shapes:
+For evaluation with `--policy.path`, export cp1000 with a matching dataset's feature shapes. Use `--eval.batch_size=1` with a compatible EE16 environment.
 
 ```bash
 uv run python examples/bagel_robotics/convert_checkpoint.py \
   --dataset-repo-id=your_namespace/ee16_demonstrations --output=outputs/bagel_robotics_cp1000 --device=cuda
 ```
 
-The script also accepts `--dataset-root`, `--bundle-path`, `--wan-model-dir`, `--local-files-only`, and JSON `--rename-map`. Pass the exported directory as `--policy.path` to evaluation with a matching EE16 environment, three cameras, and `--eval.batch_size=1`. Direct Python inference can construct `BagelRoboticsPolicy(config)` with explicit input/output features instead.
-
-CPU tests exercise reduced native experts, Euler sampling, gradients, history/blending, padding, and checkpoint/processor reloads. Full cp1000 CUDA training/inference, distributed training, simulator success rates, and exact benchmark parity remain unverified.
+CPU tests cover the native sampler and training loss with reduced experts. Full-size CUDA runs and benchmark results are pending.
