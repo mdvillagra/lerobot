@@ -14,6 +14,9 @@ from .configuration_bagel_robotics import BagelRoboticsConfig
 if TYPE_CHECKING or _bagel_robotics_available:
     from bagel_robotics.inference.assets import MANIFEST, verify_bundle, verify_wan
 
+# The public release contains the same artifacts as the package's manifest.
+_PUBLIC_RELEASE_REVISION = "7cddf301b146535f3a3ac60b9f853ff4d3ceac4b"
+
 
 def resolve_bagel_assets(config: BagelRoboticsConfig) -> tuple[Path, Path]:
     """Resolve local assets or download the pinned release, then verify its hashes."""
@@ -22,9 +25,9 @@ def resolve_bagel_assets(config: BagelRoboticsConfig) -> tuple[Path, Path]:
         raise ValueError("download_assets=False requires bundle_path and wan_model_dir")
     bundle = config.bundle_path or snapshot_download(
         MANIFEST["repo_id"],
-        revision=MANIFEST["revision"],
+        revision=_PUBLIC_RELEASE_REVISION,
         # The native loader needs architecture metadata beside the resolved video.pt.
-        local_dir=HF_LEROBOT_HOME / "bagel_robotics" / MANIFEST["revision"],
+        local_dir=HF_LEROBOT_HOME / "bagel_robotics" / _PUBLIC_RELEASE_REVISION,
         allow_patterns=list(MANIFEST["files"]),
         local_files_only=config.local_files_only,
     )

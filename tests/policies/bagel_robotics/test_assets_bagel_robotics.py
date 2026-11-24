@@ -27,7 +27,7 @@ def test_assets_use_local_paths_or_pinned_offline_cache(tmp_path, local):
         else:
             release, encoders = download.call_args_list
             assert release.args == ("bageldotcom/Bagel-Robotics-1",)
-            assert len(release.kwargs["revision"]) == 40
+            assert release.kwargs["revision"] == "7cddf301b146535f3a3ac60b9f853ff4d3ceac4b"
             assert release.kwargs["local_dir"].name == release.kwargs["revision"]
             assert set(release.kwargs["allow_patterns"]) == set(assets.MANIFEST["files"])
             assert all(call.kwargs["local_files_only"] for call in (release, encoders))

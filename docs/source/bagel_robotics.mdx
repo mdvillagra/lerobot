@@ -37,4 +37,4 @@ uv run python examples/bagel_robotics/convert_checkpoint.py \
   --dataset-repo-id=your_namespace/ee16_demonstrations --output=outputs/bagel_robotics_cp1000 --device=cuda
 ```
 
-CPU tests cover the native sampler and training loss with reduced experts. Full-size CUDA runs and benchmark results are pending.
+The full cp1000 checkpoint passed a single-GPU CUDA smoke test with synthetic EE16 data on an RTX PRO 6000. Fine-tuning used BF16, batch size 1, and SGD for two steps. Simulator benchmark results are pending.
